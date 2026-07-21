@@ -1,0 +1,75 @@
+{
+  "tools": [
+    {
+      "name": "list_datasets",
+      "description": "List all BigQuery datasets in the given project.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The Google Cloud project ID."
+          },
+          "page_size": {
+            "type": "integer",
+            "description": "Maximum number of datasets to return.",
+            "default": 50
+          },
+          "page_token": {
+            "type": "string",
+            "description": "Opaque token from a previous response for the next page."
+          }
+        },
+        "required": ["project_id"]
+      }
+    },
+    {
+      "name": "create_dataset",
+      "description": "Create a new BigQuery dataset in the given project.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The Google Cloud project ID."
+          },
+          "dataset_id": {
+            "type": "string",
+            "description": "Identifier for the dataset to create."
+          },
+          "location": {
+            "type": "string",
+            "enum": ["US", "EU", "asia-northeast1"],
+            "description": "Geographic location for the dataset."
+          },
+          "labels": {
+            "type": "object"
+          }
+        },
+        "required": ["project_id", "dataset_id"]
+      }
+    },
+    {
+      "name": "delete_table",
+      "description": "Delete a table from a BigQuery dataset.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The Google Cloud project ID."
+          },
+          "dataset_id": {
+            "type": "string",
+            "description": "Identifier of the dataset containing the table."
+          },
+          "table_id": {
+            "type": "string",
+            "description": "Identifier of the table to delete."
+          }
+        },
+        "required": ["project_id", "dataset_id", "table_id"]
+      }
+    }
+  ]
+}

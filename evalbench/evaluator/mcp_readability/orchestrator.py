@@ -36,10 +36,12 @@ import threading
 from evaluator.orchestrator import Orchestrator
 from generators.models import get_generator
 from scorers.mcp_readability_scoring import EndpointContext
+from scorers.mcp_schema_quality import McpSchemaQualityScorer
 from scorers.mcp_style_readability import McpStyleReadabilityScorer
 from scorers.mcp_tool_metrics import McpToolMetricsScorer
 from util.config import load_yaml_config
 
+from evaluator.mcp_readability import comparison as comparison_mod
 from evaluator.mcp_readability import exceptions as exceptions_mod
 
 
@@ -49,6 +51,7 @@ from evaluator.mcp_readability import exceptions as exceptions_mod
 # itself stays unchanged.
 SCORER_REGISTRY = {
     "mcp_tool_metrics": McpToolMetricsScorer,
+    "mcp_schema_quality": McpSchemaQualityScorer,
     "mcp_style_readability": McpStyleReadabilityScorer,
 }
 
@@ -67,6 +70,7 @@ ALLOWED_ENDPOINT_TYPES = ("PROD", "AUTOPUSH", "STAGING", "DEV")
 # failure aborts the whole job (fail-fast), so every persisted row is successful.
 BASE_COLUMNS = [
     "mcp_readability_product_name",
+    "mcp_readability_implementation",
     "mcp_readability_source_url",
     "mcp_readability_endpoint_type",
     "mcp_readability_check_timestamp",
@@ -153,11 +157,24 @@ class McpReadabilityOrchestrator(Orchestrator):
                 scorer_cls(scorer_config or {}, self.global_models)
             )
 
-        # Full canonical result schema for this run: base identity columns plus
-        # every configured scorer's columns.
+        # Optional LLM aligner for cross-implementation completeness. When a
+        # ``comparison.model_config`` is set, capabilities are aligned by a model;
+        # otherwise the deterministic capability signature is used (offline-safe).
+        comparison_config = config.get("comparison") or {}
+        comparison_model_config = comparison_config.get("model_config")
+        self.comparison_model = (
+            get_generator(self.global_models, comparison_model_config)
+            if comparison_model_config
+            else None
+        )
+
+        # Full canonical result schema for this run: base identity columns, every
+        # configured scorer's columns, and the cross-endpoint completeness columns
+        # added by the comparison phase.
         self.columns = list(BASE_COLUMNS)
         for scorer in self.scorers:
             self.columns.extend(scorer.COLUMNS)
+        self.columns.extend(comparison_mod.COMPLETENESS_COLUMNS)
 
         self.rows = []
         self.score_rows = []
@@ -177,7 +194,7 @@ class McpReadabilityOrchestrator(Orchestrator):
             return
 
         workers = max(1, int(self.endpoint_runners))
-        results = []  # list[(row, score_rows)]
+        results = []  # list[(row, score_rows, tools)]
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(self._check_endpoint, ep): ep for ep in endpoints
@@ -194,8 +211,19 @@ class McpReadabilityOrchestrator(Orchestrator):
                 rs[0].get("mcp_readability_source_url", ""),
             )
         )
-        self.rows = [row for row, _ in results]
-        self.score_rows = [s for _, score_rows in results for s in score_rows]
+        self.rows = [row for row, _, _ in results]
+        self.score_rows = [s for _, score_rows, _ in results for s in score_rows]
+
+        # Cross-endpoint comparison: group rows by product and score each
+        # implementation against the union of capabilities of the whole product
+        # group. Mutates rows in place (completeness columns) and adds one
+        # comparison score row per product.
+        endpoint_results = [(row, tools) for row, _, tools in results]
+        self.score_rows.extend(
+            comparison_mod.compare_products(
+                endpoint_results, model=self.comparison_model
+            )
+        )
         if self.report_progress:
             logging.info(
                 "mcp_readability: checked %d endpoints.", len(self.rows)
@@ -221,15 +249,18 @@ class McpReadabilityOrchestrator(Orchestrator):
     # Per-endpoint work
     # ------------------------------------------------------------------
     def _check_endpoint(self, endpoint: dict):
-        """Fetch + score one endpoint. Returns ``(row, score_rows)``.
+        """Fetch + score one endpoint. Returns ``(row, score_rows, tools)``.
 
         Any failure propagates (fail-fast); the run aborts and nothing persists.
         """
         product_name = endpoint.get("product_name", "")
+        implementation = endpoint.get("implementation", "")
         endpoint_type = _validate_endpoint_type(endpoint.get("endpoint_type"))
         endpoint_url = self._endpoint_ref(endpoint)
 
-        row = self._base_row(product_name, endpoint_url, endpoint_type)
+        row = self._base_row(
+            product_name, implementation, endpoint_url, endpoint_type
+        )
         row["job_id"] = self.job_id
 
         try:
@@ -270,7 +301,7 @@ class McpReadabilityOrchestrator(Orchestrator):
             )
             raise
 
-        return row, score_rows
+        return row, score_rows, tools
 
     # ------------------------------------------------------------------
     # Helpers
@@ -306,9 +337,12 @@ class McpReadabilityOrchestrator(Orchestrator):
         return kept
 
     @staticmethod
-    def _base_row(product_name, endpoint_url, endpoint_type) -> dict:
+    def _base_row(
+        product_name, implementation, endpoint_url, endpoint_type
+    ) -> dict:
         return {
             "mcp_readability_product_name": product_name,
+            "mcp_readability_implementation": implementation,
             "mcp_readability_source_url": endpoint_url,
             "mcp_readability_endpoint_type": endpoint_type,
             "mcp_readability_check_timestamp": (

@@ -1,7 +1,14 @@
-# Sample MCP endpoints. Each entry has: product_name, endpoint_type
-# (PROD | AUTOPUSH | STAGING | DEV), and a pluggable tools_source.
+# Sample MCP endpoints. Each entry has: product_name, implementation
+# (toolbox | one_mcp), endpoint_type (PROD | AUTOPUSH | STAGING | DEV), and a
+# pluggable tools_source.
 #
-# An endpoint's identity for reporting is (product_name, endpoint_type). The
+# Endpoints that share a `product_name` are treated as alternative
+# *implementations* of that product and compared side by side (Toolbox vs
+# one-MCP): each is scored against the union of capabilities exposed by any
+# implementation of the product (union-based completeness). `implementation`
+# labels which one it is in the comparison report.
+#
+# An endpoint's identity for reporting is (product_name, implementation). The
 # source is defined entirely by tools_source — there is no top-level endpoint_url.
 # tools_source.type selects how tools are obtained (independent of endpoint_type,
 # which is just the deployment channel / reporting metadata):
@@ -10,13 +17,27 @@
 #   file  - read a raw tools/list JSON dump (offline / deterministic)
 
 endpoints:
+  # --- Cloud SQL: one-MCP endpoint vs MCP Toolbox ---------------------------
   - product_name: "Cloud SQL"
+    implementation: one_mcp
     endpoint_type: PROD
     tools_source:
       type: http
       url: "https://sqladmin.googleapis.com/mcp"
 
-  - product_name: "MCP Toolbox (BigQuery)"
+  - product_name: "Cloud SQL"
+    implementation: toolbox
+    endpoint_type: DEV
+    tools_source:
+      type: stdio
+      command: "npx"
+      args: ["-y", "@toolbox-sdk/server", "--prebuilt=cloud-sql-postgres", "--stdio"]
+      # env:
+      #   CLOUD_SQL_POSTGRES_PROJECT: "your-gcp-project"
+
+  # --- BigQuery: MCP Toolbox (live, needs creds) ---------------------------
+  - product_name: "BigQuery"
+    implementation: toolbox
     endpoint_type: DEV
     tools_source:
       type: stdio
@@ -27,8 +48,19 @@ endpoints:
       # env:
       #   BIGQUERY_PROJECT: "your-gcp-project"
 
-  - product_name: "Sample (offline)"
+  # --- Sample product: two offline implementations (deterministic demo) -----
+  # A paired, network-free example so the full comparison path (union
+  # completeness + comparison.md) can be exercised without live endpoints.
+  - product_name: "Sample DB"
+    implementation: one_mcp
     endpoint_type: DEV
     tools_source:
       type: file
       path: datasets/mcp_readability/sample_tools.json
+
+  - product_name: "Sample DB"
+    implementation: toolbox
+    endpoint_type: DEV
+    tools_source:
+      type: file
+      path: datasets/mcp_readability/sample_tools_toolbox.json

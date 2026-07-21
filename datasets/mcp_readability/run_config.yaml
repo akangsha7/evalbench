@@ -21,13 +21,29 @@ orchestrator: mcp_readability
 scorers:
   # Deterministic size metrics. Pass = within token budget. `token_budget` feeds
   # mcp_readability_token_budget_used_percent (endpoints may override per-entry).
+  # Also emits efficiency (tools per 1k tokens) and the per-endpoint capability
+  # signature the comparison phase unions across implementations.
   mcp_tool_metrics:
     token_budget: 200000
+  # Deterministic schema-quality metrics (param description coverage, enum usage,
+  # pagination on list ops, read-only/destructive annotations, required-param
+  # burden). Pass = param description coverage >= min_param_desc_coverage.
+  mcp_schema_quality:
+    min_param_desc_coverage: 90
   # LLM judge vs the style guide. Pass = no P0 findings. Owns its model config
   # and style-guide path. Run with EVAL_GCP_PROJECT_REGION=global.
   mcp_style_readability:
     model_config: datasets/model_configs/gemini_3.1_pro_model.yaml
     style_guide: datasets/mcp_readability/style_guide.md
+
+# Cross-implementation comparison (Toolbox vs one-MCP for the same product).
+# Endpoints are grouped by `product_name`; each implementation is scored against
+# the union of capabilities exposed by any implementation of that product
+# (union-based completeness). Optional: set `model_config` to align capabilities
+# across differing tool names with an LLM; omit it to use the deterministic
+# capability signature (offline-safe, no model required).
+comparison: {}
+  # model_config: datasets/model_configs/gemini_2.5_pro_model.yaml
 
 # Inputs (paths relative to the repo root / run cwd).
 endpoints_config: datasets/mcp_readability/endpoints.yaml
@@ -44,9 +60,12 @@ runners:
 
 # Shared EvalBench reporters. CSV writes results/<job_id>/evals.csv; uncomment
 # bigquery to also append rows to <gcp_project_id>.evalbench.results
-# (schema auto-evolves).
+# (schema auto-evolves). comparison_report writes a side-by-side Toolbox-vs-one-MCP
+# report per product (comparison.md / comparison.html) under results/<job_id>/.
 reporting:
   csv:
+    output_directory: 'results'
+  comparison_report:
     output_directory: 'results'
   # bigquery:
   #   gcp_project_id: your-gcp-project

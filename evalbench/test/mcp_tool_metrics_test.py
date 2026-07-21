@@ -5,7 +5,11 @@ import unittest
 
 from mcp import types as mcp_types
 
-from scorers.mcp_tool_metrics import McpToolMetricsScorer
+from scorers.mcp_tool_metrics import (
+    McpToolMetricsScorer,
+    capability_signature,
+    normalize_capability,
+)
 
 
 def _tool(name, description, schema=None):
@@ -93,6 +97,52 @@ class McpToolMetricsScorerTest(unittest.TestCase):
         self.assertEqual(
             result["token_budget_used_percent"], round(est / 2000 * 100, 2)
         )
+
+
+    # ---- efficiency + avg tokens per tool ----------------------------
+    def test_avg_tokens_per_tool(self):
+        tools = [_tool("a", "A."), _tool("b", "B.")]
+        result = self.scorer.score(tools)
+        expected = round(result["estimated_tokens"] / 2, 2)
+        self.assertEqual(result["avg_tokens_per_tool"], expected)
+
+    def test_efficiency_tools_per_1k_tokens(self):
+        tools = [_tool("a", "A."), _tool("b", "B.")]
+        result = self.scorer.score(tools)
+        expected = round(2 / (result["estimated_tokens"] / 1000), 2)
+        self.assertEqual(result["efficiency_tools_per_1k_tokens"], expected)
+
+    def test_empty_tools_zero_efficiency(self):
+        result = self.scorer.score([])
+        self.assertEqual(result["avg_tokens_per_tool"], 0.0)
+        self.assertEqual(result["efficiency_tools_per_1k_tokens"], 0.0)
+        self.assertEqual(result["capabilities"], [])
+
+    # ---- capability signature ----------------------------------------
+    def test_capability_signature_normalizes_and_dedups(self):
+        tools = [
+            _tool("list_datasets", "d"),
+            _tool("getDataset", "d"),  # camelCase, get synonym
+            _tool("describe_dataset", "d"),  # describe -> get (dupe of above)
+        ]
+        caps = capability_signature(tools)
+        self.assertEqual(caps, ["get_dataset", "list_dataset"])
+
+    def test_capability_signature_in_row_fields(self):
+        tools = [_tool("list_datasets", "d"), _tool("delete_table", "d")]
+        result = self.scorer.score(tools)
+        self.assertEqual(
+            sorted(result["capabilities"]), ["delete_table", "list_dataset"]
+        )
+
+    def test_normalize_capability_synonyms(self):
+        self.assertEqual(normalize_capability("remove_backup"), "delete_backup")
+        self.assertEqual(normalize_capability("patch_instance"), "update_instance")
+        self.assertEqual(normalize_capability("get_instances"), "get_instance")
+        # verb as trailing token
+        self.assertEqual(normalize_capability("instance_get"), "get_instance")
+        # no recognizable verb -> falls back to normalized tokens
+        self.assertEqual(normalize_capability("query"), "query")
 
 
 if __name__ == "__main__":

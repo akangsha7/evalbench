@@ -2,6 +2,7 @@ from .csv import CsvReporter
 from .bqstore import BigQueryReporter
 from .report import Reporter
 from .gcs_artifact import GcsReporter
+from .comparison_report import ComparisonReporter
 
 
 def get_reporters(reporting_config, job_id, run_time) -> list[Reporter]:
@@ -25,4 +26,7 @@ def get_reporters(reporting_config, job_id, run_time) -> list[Reporter]:
     if "gcs_artifacts" in reporting_config and not reporting_config.get("gcs_artifacts", {}).get("delegated", False):
         reporters.append(GcsReporter(
             reporting_config["gcs_artifacts"], job_id, run_time))
+    if "comparison_report" in reporting_config:
+        reporters.append(ComparisonReporter(
+            reporting_config["comparison_report"], job_id, run_time))
     return reporters

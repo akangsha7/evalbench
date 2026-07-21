@@ -6,6 +6,7 @@ a clear ``TruncatedResponseError`` instead of falling through to a cryptic JSON
 parse failure.
 """
 
+import json
 import os
 import tempfile
 import types as pytypes
@@ -110,6 +111,124 @@ class GenerateTruncationTest(unittest.TestCase):
         out = scorer._generate("prompt")
         self.assertTrue(model.generate_called)
         self.assertIn("readability_score", out)
+
+
+class ParsePerToolFindingsTest(unittest.TestCase):
+    """`_parse` keeps the judge's per-tool grouping and counts every finding."""
+
+    def _parse(self, by_tool):
+        scorer = McpStyleReadabilityScorer.__new__(McpStyleReadabilityScorer)
+        return scorer._parse(json.dumps({"findings_by_tool": by_tool}))
+
+    def test_grouping_is_kept_as_returned(self):
+        out = self._parse(
+            [
+                {
+                    "tool": "general",
+                    "findings": [
+                        {"severity": "P0", "rule_id": "Tool Count Limits"}
+                    ],
+                },
+                {
+                    "tool": "create_instance",
+                    "findings": [
+                        {
+                            "severity": "P0",
+                            "rule_id": "Avoid complex parameters",
+                            "message": "pscInstanceConfig is deeply nested.",
+                        }
+                    ],
+                },
+            ]
+        )
+        # Entry order and per-tool findings come straight from the judge.
+        self.assertEqual(
+            [e["tool"] for e in out["findings_by_tool"]],
+            ["general", "create_instance"],
+        )
+        self.assertIn(
+            "pscInstanceConfig",
+            out["findings_by_tool"][1]["findings"][0]["message"],
+        )
+        self.assertEqual(out["p0_issues"], 2)
+
+    def test_same_rule_under_two_tools_counts_twice(self):
+        rule = {"severity": "P0", "rule_id": "Avoid complex parameters"}
+        out = self._parse(
+            [
+                {"tool": "create_instance", "findings": [dict(rule)]},
+                {"tool": "update_instance", "findings": [dict(rule)]},
+            ]
+        )
+        self.assertEqual(out["p0_issues"], 2)
+        self.assertEqual(len(out["findings_by_tool"]), 2)
+
+    def test_ruleless_findings_each_count(self):
+        out = self._parse(
+            [
+                {"tool": "a", "findings": [{"severity": "P2"}]},
+                {"tool": "b", "findings": [{"severity": "P2"}]},
+            ]
+        )
+        self.assertEqual(out["p2_issues"], 2)
+
+    def test_unusable_entries_are_dropped(self):
+        out = self._parse(
+            [
+                "not an entry",
+                {"tool": "", "findings": [{"severity": "P0"}]},
+                {"tool": "a", "findings": "not a list"},
+                {"tool": "b", "findings": [{"severity": "P1"}]},
+            ]
+        )
+        self.assertEqual([e["tool"] for e in out["findings_by_tool"]], ["b"])
+        self.assertEqual(out["p1_issues"], 1)
+
+
+class EvaluateRetryTest(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False
+        )
+        self._tmp.write("# style guide\n")
+        self._tmp.close()
+
+    def tearDown(self):
+        os.unlink(self._tmp.name)
+
+    def _scorer(self):
+        cfg = {"model_config": "unused", "style_guide": self._tmp.name}
+        with patch.object(
+            mcp_style_readability,
+            "get_generator",
+            return_value=_FakeGeminiModel(_resp(FinishReason.STOP, "{}")),
+        ):
+            return McpStyleReadabilityScorer(cfg, global_models=None)
+
+    def test_evaluate_retries_until_parse_succeeds(self):
+        scorer = self._scorer()
+        scorer.max_attempts = 3
+        # First two generations are malformed; the third parses.
+        responses = ["{ not json", "still { bad", '{"findings": []}']
+        scorer._generate = lambda prompt: responses.pop(0)
+        out = scorer.evaluate("man page", "guide", "AlloyDB")
+        self.assertEqual(out["p0_issues"], 0)
+        self.assertEqual(responses, [])  # all three consumed
+
+    def test_evaluate_raises_after_max_attempts(self):
+        scorer = self._scorer()
+        scorer.max_attempts = 3
+        calls = {"n": 0}
+
+        def gen(prompt):
+            calls["n"] += 1
+            return "never valid json"
+
+        scorer._generate = gen
+        with self.assertRaises(ValueError):
+            scorer.evaluate("man page", "guide", "AlloyDB")
+        self.assertEqual(calls["n"], 3)  # retried exactly max_attempts times
 
 
 if __name__ == "__main__":
