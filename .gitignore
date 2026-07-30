@@ -202,5 +202,9 @@ datasets/model_configs/gemini_2.5_pro_test_model.yaml
 datasets/model_configs/gemini_3_flash_test_model.yaml
 datasets/model_configs/codex_cli_dak_model.yaml
 
+# Rebuilt by refresh_toolbox_prebuilts.py before every readability run
+datasets/mcp_readability/captures/
+datasets/mcp_readability/endpoints.toolbox_prebuilts.yaml
+
 
 
