@@ -54,8 +54,11 @@ SCORER_REGISTRY = {
 
 
 # Allowed endpoint_type values (deployment channel / dashboard categorization).
-# Validated at load time; an unknown value fails the run fast.
-ALLOWED_ENDPOINT_TYPES = ("PROD", "AUTOPUSH", "STAGING", "DEV")
+# Validated at load time; an unknown value fails the run fast. PREBUILT_TOOL is
+# not a channel: it marks a tool set that ships inside a distributed binary rather
+# than behind a deployed endpoint, so its rows are not comparable to a served
+# PROD one.
+ALLOWED_ENDPOINT_TYPES = ("PROD", "AUTOPUSH", "STAGING", "DEV", "PREBUILT_TOOL")
 
 
 # Base identity columns present on every result row (``job_id`` is the shared

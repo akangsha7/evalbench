@@ -158,6 +158,134 @@ class CaptureLiveTest(unittest.TestCase):
             self._capture(fetch_result=[])
 
 
+_SKILL_MD = """---
+name: postgres-data
+description:
+---
+
+## Usage
+
+Some preamble that is not a tool.
+
+## Scripts
+
+
+### execute_sql
+
+Use this tool to execute a single SQL statement.
+
+#### Parameters
+
+| Name | Type | Description | Required | Default |
+| :--- | :--- | :--- | :--- | :--- |
+| sql | string | The sql to execute. | Yes |  |
+| limit | integer | Max rows. | No | `50` |
+| dry_run | boolean | Preview only. | No | `false` |
+| recall | float | Target recall. | No | `0.95` |
+| roles | array | Roles to grant. | No | `[]` |
+
+
+---
+
+### database_overview
+
+Fetches the current state of the server.
+
+
+---
+"""
+
+
+class ParseSkillMdTest(unittest.TestCase):
+
+    def setUp(self):
+        self.tools = {t["name"]: t
+                      for t in capture._parse_skill_md(_SKILL_MD)}
+
+    def test_reads_every_tool_and_ignores_prose_headings(self):
+        # "## Usage" / "## Scripts" are not tools; only "### " headings are.
+        self.assertEqual(set(self.tools), {"execute_sql", "database_overview"})
+
+    def test_separates_required_from_optional(self):
+        schema = self.tools["execute_sql"]["inputSchema"]
+        self.assertEqual(schema["required"], ["sql"])
+
+    def test_maps_toolbox_types_onto_json_schema(self):
+        props = self.tools["execute_sql"]["inputSchema"]["properties"]
+        self.assertEqual(props["limit"]["type"], "integer")
+        # "float" is Toolbox's spelling; JSON Schema calls it "number".
+        self.assertEqual(props["recall"]["type"], "number")
+
+    def test_reads_defaults_as_typed_values(self):
+        props = self.tools["execute_sql"]["inputSchema"]["properties"]
+        self.assertEqual(props["limit"]["default"], 50)
+        self.assertIs(props["dry_run"]["default"], False)
+        self.assertEqual(props["roles"]["default"], [])
+        # A blank cell is no default, not an empty string.
+        self.assertNotIn("default", props["sql"])
+
+    def test_keeps_the_section_rule_out_of_a_description(self):
+        # A tool with no parameters runs to the "---" before the next heading.
+        self.assertEqual(
+            self.tools["database_overview"]["description"],
+            "Fetches the current state of the server.",
+        )
+
+    def test_a_tool_without_parameters_still_has_a_schema(self):
+        schema = self.tools["database_overview"]["inputSchema"]
+        self.assertEqual(schema["properties"], {})
+        self.assertEqual(schema["required"], [])
+
+
+class CaptureOfflineTest(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out = os.path.join(self.tmp, "nested", "postgres.tools.json")
+
+    def _run(self, returncode=0, groups=(("a", _SKILL_MD),)):
+        def fake_run(cmd, **kwargs):
+            out_dir = cmd[cmd.index("--output-dir") + 1]
+            for name, text in groups:
+                d = os.path.join(out_dir, name)
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, "SKILL.md"), "w") as f:
+                    f.write(text)
+
+            class Result:
+                pass
+            Result.returncode = returncode
+            Result.stdout = ""
+            Result.stderr = "boom" if returncode else ""
+            return Result
+
+        with patch.object(capture.subprocess, "run", side_effect=fake_run):
+            return capture.capture_offline("tb", "postgres", self.out)
+
+    def test_writes_a_spec_the_generator_can_read_back(self):
+        count = self._run()
+        self.assertEqual(count, 2)
+        tools, man_page = McpToolsGenerator({}).fetch_tools(
+            {"tools_source": {"type": "file", "path": self.out}}
+        )
+        self.assertEqual([t.name for t in tools],
+                         ["database_overview", "execute_sql"])
+        self.assertIn("execute_sql", man_page)
+
+    def test_collapses_a_tool_shared_by_several_skill_groups(self):
+        # A prebuilt renders one skill per group and tools repeat across them.
+        count = self._run(groups=(("a", _SKILL_MD), ("b", _SKILL_MD)))
+        self.assertEqual(count, 2)
+
+    def test_reports_a_failed_generate(self):
+        with self.assertRaises(capture.CaptureError):
+            self._run(returncode=1)
+
+    def test_rejects_output_with_no_tools(self):
+        with self.assertRaises(capture.CaptureError):
+            self._run(groups=(("a", "# nothing here\n"),))
+
+
 class WriteEndpointsYamlTest(unittest.TestCase):
 
     def test_emits_endpoints_the_orchestrator_can_consume(self):
@@ -184,7 +312,7 @@ class WriteEndpointsYamlTest(unittest.TestCase):
         first = parsed["endpoints"][0]
         self.assertEqual(first["tools_source"],
                          {"type": "file", "path": "a/bigquery.json"})
-        self.assertEqual(first["endpoint_type"], "PROD")
+        self.assertEqual(first["endpoint_type"], "PREBUILT_TOOL")
         # Only fields the orchestrator reads; anything else is dead config.
         self.assertEqual(set(first),
                          {"product_name", "endpoint_type", "tools_source"})

@@ -69,6 +69,10 @@ _FALLBACK_PREBUILTS = (
     "spanner", "spanner-postgres", "sqlite",
 )
 
+# skills-generate renders Toolbox's own parameter vocabulary, which is not quite
+# JSON Schema's. Anything absent here is already a JSON Schema type name.
+_JSON_SCHEMA_TYPES = {"float": "number"}
+
 # Forced regardless of what the config asks for: without it the Looker source
 # performs a login round-trip against LOOKER_BASE_URL and cannot start.
 _FORCED_ENV = {"LOOKER_USE_CLIENT_OAUTH": "true"}
@@ -245,8 +249,115 @@ def capture_live(
     return len(tools)
 
 
+def _coerce_default(raw: str):
+    """Turn a ``Default`` cell into a JSON value, or None if the cell is blank.
+
+    Cells are rendered as `` `false` ``/`` `50` ``/`` `[]` ``. Anything that is
+    not valid JSON is kept as the literal string.
+    """
+    text = raw.strip().strip("`").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _parse_skill_md(text: str) -> list[dict]:
+    """Tools described by one generated ``SKILL.md``.
+
+    Each tool is a ``### <name>`` heading followed by its description and, when
+    it takes any, a ``#### Parameters`` table of
+    ``Name | Type | Description | Required | Default``.
+    """
+    tools = []
+    sections = re.finditer(
+        r"^### (\S+)\n(.*?)(?=^### |\Z)", text, re.S | re.M
+    )
+    for section in sections:
+        name = section.group(1)
+        body = section.group(2)
+        # A tool with no parameters runs to the "---" rule before the next
+        # heading, which would otherwise land in its description.
+        description = body.split("#### Parameters")[0]
+        description = re.sub(r"\n+-{3,}\s*$", "", description).strip()
+
+        properties, required = {}, []
+        for row in re.finditer(
+            r"^\| (\S+) \| (\S+) \| (.*?) \| (Yes|No) \| (.*?) \|$",
+            body, re.M,
+        ):
+            param, ptype, pdesc, is_required, pdefault = row.groups()
+            # The table's vocabulary is Toolbox's, not JSON Schema's.
+            schema = {"type": _JSON_SCHEMA_TYPES.get(ptype, ptype)}
+            if pdesc.strip():
+                schema["description"] = pdesc.strip()
+            default = _coerce_default(pdefault)
+            if default is not None:
+                schema["default"] = default
+            properties[param] = schema
+            if is_required == "Yes":
+                required.append(param)
+
+        tools.append({
+            "name": name,
+            "description": description,
+            "inputSchema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        })
+    return tools
+
+
+def capture_offline(binary: str, prebuilt: str, out_path: str) -> int:
+    """Write ``prebuilt``'s tools to ``out_path`` without starting a server.
+
+    ``skills-generate`` renders each tool from its static config, so this works
+    for sources that dial a real backend. Two things the live path would give
+    are not recoverable from the rendered tables: the element type of an
+    ``array`` parameter, and any schema refinement a tool makes against its
+    source (an injected parameter default, say). Prefer ``capture_live``.
+
+    Returns the number of tools captured.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = subprocess.run(
+            [binary, "skills-generate", "--prebuilt", prebuilt,
+             "--output-dir", tmp],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            raise CaptureError(
+                f"{prebuilt}: skills-generate failed: {proc.stderr.strip()}"
+            )
+
+        # A prebuilt renders one skill per group, and a tool can belong to
+        # several. Keyed by name, so the duplicates collapse.
+        by_name: dict[str, dict] = {}
+        for root, _, files in os.walk(tmp):
+            for fname in files:
+                if fname != "SKILL.md":
+                    continue
+                with open(os.path.join(root, fname)) as f:
+                    for tool in _parse_skill_md(f.read()):
+                        by_name.setdefault(tool["name"], tool)
+
+    if not by_name:
+        raise CaptureError(f"{prebuilt}: skills-generate produced no tools")
+
+    payload = {"tools": [by_name[n] for n in sorted(by_name)]}
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return len(by_name)
+
+
 def write_endpoints_yaml(
-    captures: list[dict], out_path: str, endpoint_type: str = "PROD"
+    captures: list[dict], out_path: str, endpoint_type: str = "PREBUILT_TOOL"
 ) -> None:
     """Render an ``endpoints.yaml`` over successfully captured prebuilts.
 

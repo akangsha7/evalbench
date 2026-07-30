@@ -9,10 +9,11 @@ config points at. Captures are build artifacts, not source -- they are
 gitignored, and diffing yesterday's against today's is how you find which tool
 description actually moved a score.
 
-Prebuilts whose sources dial a real backend cannot be captured live and are
-reported as skipped; covering those needs an offline extraction path from the
-toolbox binary. Pin ``--version`` and bump it deliberately, so that a change in
-the captures means upstream changed a tool and not that the version drifted.
+Prebuilts whose sources dial a real backend cannot be captured live; those fall
+back to rendering the tools from static config, which needs no server. The
+strategy used is recorded per prebuilt in the manifest. Pin ``--version`` and
+bump it deliberately, so that a change in the captures means upstream changed a
+tool and not that the version drifted.
 
 Requires Application Default Credentials: most sources mint a token at startup
 even though they never call the backend.
@@ -31,6 +32,7 @@ sys.path.insert(
 from generators.models.toolbox_prebuilt_capture import (  # noqa: E402
     CaptureError,
     capture_live,
+    capture_offline,
     list_prebuilts,
     resolve_toolbox_binary,
     write_endpoints_yaml,
@@ -80,18 +82,29 @@ def main() -> int:
     captured, skipped = [], []
     for prebuilt in prebuilts:
         path = os.path.join(args.out_dir, f"{prebuilt}.tools.json")
+        strategy = "live"
         try:
             count = capture_live(
                 binary, prebuilt, path,
                 project=args.project, region=args.region,
             )
-        except CaptureError as e:
-            logging.warning("skip %s: %s", prebuilt, e)
-            skipped.append(prebuilt)
-            continue
-        logging.info("captured %s (%d tools)", prebuilt, count)
+        except CaptureError as live_error:
+            # Expected for any source that dials a real backend. Fall back to
+            # rendering the tools from static config, which needs no server.
+            logging.info(
+                "%s: no live capture (%s); falling back to offline",
+                prebuilt, live_error,
+            )
+            strategy = "offline"
+            try:
+                count = capture_offline(binary, prebuilt, path)
+            except CaptureError as offline_error:
+                logging.warning("skip %s: %s", prebuilt, offline_error)
+                skipped.append(prebuilt)
+                continue
+        logging.info("captured %s (%d tools, %s)", prebuilt, count, strategy)
         captured.append(
-            {"prebuilt": prebuilt, "path": path, "strategy": "live"}
+            {"prebuilt": prebuilt, "path": path, "strategy": strategy}
         )
 
     if not captured:
@@ -111,12 +124,14 @@ def main() -> int:
         )
         f.write("\n")
 
+    live = sum(1 for c in captured if c["strategy"] == "live")
     logging.info(
-        "Captured %d/%d prebuilts -> %s",
-        len(captured), len(prebuilts), args.endpoints_out,
+        "Captured %d/%d prebuilts (%d live, %d offline) -> %s",
+        len(captured), len(prebuilts), live, len(captured) - live,
+        args.endpoints_out,
     )
     if skipped:
-        logging.info("Needs offline extraction: %s", ", ".join(skipped))
+        logging.warning("Could not capture: %s", ", ".join(skipped))
     return 0
 
 

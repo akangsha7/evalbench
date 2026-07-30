@@ -42,7 +42,9 @@ def test_endpoint_type_validation():
     assert _validate_endpoint_type("PROD") == "PROD"
     assert _validate_endpoint_type("dev") == "DEV"
     assert _validate_endpoint_type(" AutoPush ") == "AUTOPUSH"
-    assert set(ALLOWED_ENDPOINT_TYPES) == {"PROD", "AUTOPUSH", "STAGING", "DEV"}
+    assert set(ALLOWED_ENDPOINT_TYPES) == {
+        "PROD", "AUTOPUSH", "STAGING", "DEV", "PREBUILT_TOOL",
+    }
     # Unknown / missing values fail fast.
     with pytest.raises(ValueError):
         _validate_endpoint_type("bogus")

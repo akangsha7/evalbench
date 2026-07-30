@@ -40,7 +40,7 @@ runners:
 reporting:
   csv:
     output_directory: 'results'
-  # Appends to <gcp_project_id>.evalbench.results and .scores; the
-  # mcp_readability_* columns self-provision on the first run.
-  # bigquery:
-  #   gcp_project_id: your-gcp-project
+  # Appends to cloud-db-nl2sql.evalbench.results and .scores -- the same tables
+  # the dashboard reads. The mcp_readability_* columns already exist there.
+  bigquery:
+    gcp_project_id: cloud-db-nl2sql
